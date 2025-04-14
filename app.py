@@ -15,6 +15,9 @@ SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 memory_dict = {}
 max_context_length = 10  # 最多記住幾句對話
 
+# 防止重複事件處理
+recent_event_ids = set()
+
 def reply_to_slack(channel, text):
     headers = {
         "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
@@ -26,23 +29,6 @@ def reply_to_slack(channel, text):
     }
     requests.post("https://slack.com/api/chat.postMessage", headers=headers, json=data)
 
-def send_image_to_slack(channel, image_url):
-    headers = {
-        "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
-        "Content-Type": "application/json"
-    }
-    data = {
-        "channel": channel,
-        "blocks": [
-            {
-                "type": "image",
-                "image_url": image_url,
-                "alt_text": "GPT生成圖片"
-            }
-        ]
-    }
-    requests.post("https://slack.com/api/chat.postMessage", headers=headers, json=data)
-
 @app.route("/", methods=["POST"])
 def slack_events():
     data = request.get_json()
@@ -50,6 +36,14 @@ def slack_events():
     # Slack webhook 驗證
     if data.get("type") == "url_verification":
         return data.get("challenge"), 200, {"Content-Type": "text/plain"}
+
+    # 去重處理：避免重複事件導致回兩次
+    event_id = data.get("event_id")
+    if event_id in recent_event_ids:
+        return "Duplicate event, ignored.", 200
+    recent_event_ids.add(event_id)
+    if len(recent_event_ids) > 100:
+        recent_event_ids.pop()
 
     if "event" in data:
         event = data["event"]
@@ -60,35 +54,25 @@ def slack_events():
             channel = event.get("channel")
             user_id = event.get("user")
 
-            # draw 指令：畫圖
-            if user_input.strip().lower().startswith("/draw"):
-                prompt = user_input.replace("/draw", "").strip()
-                try:
-                    response = client.images.generate(
-                        model="dall-e-3",
-                        prompt=prompt,
-                        size="1024x1024",
-                        n=1
-                    )
-                    image_url = response.data[0].url
-                    send_image_to_slack(channel, image_url)
-                except Exception as e:
-                    reply_to_slack(channel, f"圖片生成失敗：{str(e)}")
-                return "OK", 200
-
             # reset 指令：清除記憶
             if user_input.strip().lower() == "/reset":
                 memory_dict[user_id] = []
                 reply_to_slack(channel, "記憶已清除 ✅")
                 return "OK", 200
 
-            # 正常對話：使用 GPT-4o 並附加上下文
+            # 正常對話：使用 GPT，根據訊息長度決定模型
             history = memory_dict.get(user_id, [])
             history.append({"role": "user", "content": user_input})
 
+            # 自動選模型：短文字用 3.5，長對話或複雜內容用 4o
+            if len(user_input) < 50 and len(history) < 6:
+                model = "gpt-3.5-turbo"
+            else:
+                model = "gpt-4o"
+
             try:
                 response = client.chat.completions.create(
-                    model="gpt-4o",
+                    model=model,
                     messages=history
                 )
                 reply = response.choices[0].message.content
