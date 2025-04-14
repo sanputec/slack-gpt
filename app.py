@@ -5,7 +5,7 @@ import requests
 
 app = Flask(__name__)
 
-# 從環境變數取得 API 金鑰
+# 從環境變數取得金鑰
 openai.api_key = os.environ.get("OPENAI_API_KEY")
 SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN")
 
@@ -24,13 +24,28 @@ def reply_to_slack(channel, text):
 def slack_events():
     data = request.get_json()
 
-    # ✅ Step 1: 處理 Slack 驗證 (url_verification)
+    # ✅ Slack 驗證（第一次連 webhook 時）
     if data.get("type") == "url_verification":
         return data.get("challenge"), 200, {"Content-Type": "text/plain"}
 
-    # ✅ Step 2: 處理來自 Slack 的訊息事件
+    # ✅ 處理 Slack 訊息事件
     if "event" in data:
         event = data["event"]
 
-        # 處理來自私訊 (im) 的訊息
-        if event.get("type") == "message" and event.get("channel_type") == "im" and not event.get("bot_id
+        # ✅ 處理 DM 訊息 + 避免自己觸發自己
+        if event.get("type") == "message" and event.get("channel_type") == "im" and not event.get("bot_id"):
+            user_input = event.get("text")
+            channel = event.get("channel")
+
+            try:
+                response = openai.ChatCompletion.create(
+                    model="gpt-3.5-turbo",
+                    messages=[{"role": "user", "content": user_input}]
+                )
+                reply = response["choices"][0]["message"]["content"]
+            except Exception as e:
+                reply = f"出錯了：{str(e)}"
+
+            reply_to_slack(channel, reply)
+
+    return "OK", 200
